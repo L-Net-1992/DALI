@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 #include <memory>
 #include <iomanip>
 #include "dali/core/error_handling.h"
+#include "dali/core/util.h"
 
 
 namespace dali {
@@ -85,7 +86,7 @@ const std::vector<AVCodecID> FramesDecoder::SupportedCodecs = {
   AVCodecID::AV_CODEC_ID_MPEG4
 };
 
-int64 FramesDecoder::NumFrames() const {
+int64_t FramesDecoder::NumFrames() const {
     if (num_frames_.has_value()) {
       return num_frames_.value();
     }
@@ -127,7 +128,7 @@ bool FramesDecoder::CheckCodecSupport() {
     av_state_->codec_params_->codec_id) != SupportedCodecs.end();
 }
 
-void FramesDecoder::FindVideoStream(bool init_codecs) {
+bool FramesDecoder::FindVideoStream(bool init_codecs) {
   if (init_codecs) {
     size_t i = 0;
 
@@ -145,22 +146,33 @@ void FramesDecoder::FindVideoStream(bool init_codecs) {
       }
     }
 
-    DALI_ENFORCE(i < av_state_->ctx_->nb_streams,
-                 make_string("Could not find a valid video stream in a file ", Filename()));
+    if (i >= av_state_->ctx_->nb_streams) {
+      DALI_WARN(make_string("Could not find a valid video stream in a file \"", Filename(), "\""));
+      return false;
+    }
   } else {
     av_state_->stream_id_ = av_find_best_stream(av_state_->ctx_, AVMEDIA_TYPE_VIDEO,
                                                 -1, -1, nullptr, 0);
 
     LOG_LINE << "Best stream " << av_state_->stream_id_ << std::endl;
-    DALI_ENFORCE(av_state_->stream_id_ >= 0,
-                 make_string("Could not find video stream in ", Filename()));
+    if (av_state_->stream_id_ < 0) {
+      DALI_WARN(make_string("Could not find a valid video stream in a file \"", Filename(), "\""));
+      return false;
+    }
 
     av_state_->codec_params_ = av_state_->ctx_->streams[av_state_->stream_id_]->codecpar;
   }
   if (Height() == 0 || Width() == 0) {
-    DALI_ENFORCE(avformat_find_stream_info(av_state_->ctx_, nullptr) >= 0);
-    DALI_ENFORCE(Height() != 0 && Width() != 0, "Couldn't load video size info.");
+    if (avformat_find_stream_info(av_state_->ctx_, nullptr) < 0) {
+      DALI_WARN(make_string("Could not find stream information in \"", Filename(), "\""));
+      return false;
+    }
+    if (Height() == 0 || Width() == 0) {
+      DALI_WARN("Couldn't load video size info.");
+      return false;
+    }
   }
+  return true;
 }
 
 FramesDecoder::FramesDecoder(const std::string &filename)
@@ -172,26 +184,31 @@ FramesDecoder::FramesDecoder(const std::string &filename)
   DALI_ENFORCE(av_state_->ctx_, "Could not alloc avformat context");
 
   int ret = avformat_open_input(&av_state_->ctx_, Filename().c_str(), nullptr, nullptr);
-  DALI_ENFORCE(ret == 0, make_string("Failed to open video file ", Filename(), "due to ",
-                                     detail::av_error_string(ret)));
+  if (ret != 0) {
+    DALI_WARN(make_string("Failed to open video file \"", Filename(), "\" due to ",
+                          detail::av_error_string(ret)));
+    return;
+  }
 
-  FindVideoStream();
-  DALI_ENFORCE(
-    CheckCodecSupport(),
-    make_string(
-      "Unsupported video codec: ",
-      CodecName(),
-      " in file: ", Filename(),
-      " Supported codecs: h264, HEVC."));
+  if (!FindVideoStream()) {
+    return;
+  }
+  if (!CheckCodecSupport()) {
+    DALI_WARN(make_string("Unsupported video codec: ", CodecName(),
+                          ". Supported codecs: h264, HEVC."));
+    return;
+  }
   InitAvState();
   BuildIndex();
   DetectVfr();
+  is_valid_ = true;
 }
 
 
 FramesDecoder::FramesDecoder(const char *memory_file, int memory_file_size, bool build_index,
-                             bool init_codecs, int num_frames)
+                             bool init_codecs, int num_frames, std::string_view source_info)
   : av_state_(std::make_unique<AvState>()),
+    filename_(source_info),
     memory_video_file_(MemoryVideoFile(memory_file, memory_file_size)) {
   DALI_ENFORCE(init_codecs || !build_index,
                "FramesDecoder doesn't support index without CPU codecs");
@@ -218,16 +235,20 @@ FramesDecoder::FramesDecoder(const char *memory_file, int memory_file_size, bool
   av_state_->ctx_->pb = av_io_context;
 
   int ret = avformat_open_input(&av_state_->ctx_, "", nullptr, nullptr);
-  DALI_ENFORCE(ret == 0, make_string("Failed to open video file ", Filename(), "due to ",
-                                     detail::av_error_string(ret)));
+  if (ret != 0) {
+    DALI_WARN(make_string("Failed to open video file \"", Filename(), "\", due to ",
+                          detail::av_error_string(ret)));
+    return;
+  }
 
-  FindVideoStream(init_codecs || build_index);
-  DALI_ENFORCE(
-    CheckCodecSupport(),
-    make_string(
-      "Unsupported video codec: ",
-      CodecName(),
-      ". Supported codecs: h264, HEVC."));
+  if (!FindVideoStream(init_codecs || build_index)) {
+    return;
+  }
+  if (!CheckCodecSupport()) {
+    DALI_WARN(make_string("Unsupported video codec: \"", CodecName(),
+                          "\". Supported codecs: h264, HEVC."));
+    return;
+  }
   InitAvState(init_codecs || build_index);
 
   // Number of frames is unknown and we do not plan to build the index
@@ -236,11 +257,13 @@ FramesDecoder::FramesDecoder(const char *memory_file, int memory_file_size, bool
   }
 
   if (!build_index) {
+    is_valid_ = true;
     return;
   }
 
   BuildIndex();
   DetectVfr();
+  is_valid_ = true;
 }
 
 void FramesDecoder::CreateAvState(std::unique_ptr<AvState> &av_state, bool init_codecs) {
@@ -264,9 +287,9 @@ void FramesDecoder::CreateAvState(std::unique_ptr<AvState> &av_state, bool init_
     DALI_ENFORCE(
       ret == 0,
       make_string(
-        "Failed to open video file ",
+        "Failed to open video file \"",
         Filename(),
-        "due to ",
+        "\", due to ",
         detail::av_error_string(ret)));
     av_state->stream_id_ = av_find_best_stream(
       av_state->ctx_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
@@ -312,13 +335,26 @@ void FramesDecoder::CountFrames(AvState *av_state) {
   }
 }
 
-bool FramesDecoder::IsFormatSeekable() {
-  if (
-    av_state_->ctx_->iformat->read_seek == nullptr &&
-    av_state_->ctx_->iformat->read_seek2 == nullptr) {
-    return false;
-  }
+IMPL_HAS_MEMBER(read_seek);
+IMPL_HAS_MEMBER(read_seek2);
 
+template <typename FormatDesc>
+bool IsFormatSeekableHelper(FormatDesc *iformat) {
+  if constexpr (has_member_read_seek_v<FormatDesc>) {
+    static_assert(has_member_read_seek2_v<FormatDesc>);
+    if (iformat->read_seek == nullptr &&
+        iformat->read_seek2 == nullptr)
+      return false;
+  } else {
+    if (iformat->flags & (AVFMT_NOBINSEARCH | AVFMT_NOGENSEARCH))
+      return false;
+  }
+  return true;
+}
+
+bool FramesDecoder::IsFormatSeekable() {
+  if (!IsFormatSeekableHelper(av_state_->ctx_->iformat))
+    return false;
   return av_state_->ctx_->pb->read_seek != nullptr;
 }
 
@@ -332,7 +368,7 @@ void FramesDecoder::BuildIndex() {
   int last_keyframe = -1;
   while (ReadRegularFrame(nullptr, false)) {
     IndexEntry entry;
-    entry.is_keyframe = av_state_->frame_->key_frame;
+    entry.is_keyframe = av_state_->frame_->flags & AV_FRAME_FLAG_KEY;
     entry.pts = av_state_->frame_->pts;
     entry.is_flush_frame = false;
 
@@ -464,9 +500,9 @@ void FramesDecoder::Reset() {
   DALI_ENFORCE(
     ret >= 0,
     make_string(
-      "Could not seek to the first frame of video ",
+      "Could not seek to the first frame of video \"",
       Filename(),
-      "due to",
+      "\", due to ",
       detail::av_error_string(ret)));
   if (av_state_->codec_) {
     avcodec_flush_buffers(av_state_->codec_ctx_);
@@ -491,6 +527,7 @@ void FramesDecoder::SeekFrame(int frame_id) {
 
   // Seeking clears av buffers, so reset flush state info
   if (flush_state_) {
+    while (ReadFlushFrame(nullptr, false)) {}
     flush_state_ = false;
   }
 
@@ -503,9 +540,9 @@ void FramesDecoder::SeekFrame(int frame_id) {
       frame_id,
       "with keyframe",
       keyframe_id,
-      "in video ",
+      "in video \"",
       Filename(),
-      "due to ",
+      "\" due to ",
       detail::av_error_string(ret)));
 
   avcodec_flush_buffers(av_state_->codec_ctx_);

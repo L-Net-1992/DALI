@@ -1,16 +1,16 @@
 Single Shot MultiBox Detector Training in PyTorch
 =================================================
 
-This example shows how DALI can be used in detection networks, specifically Single Shot Multibox Detector originally published by Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian Szegedy, 
+This example shows how DALI can be used in detection networks, specifically Single Shot Multibox Detector originally published by Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian Szegedy,
 Scott Reed, Cheng-Yang Fu, Alexander C. Berg as `SSD: Single Shot MultiBox Detector <https://arxiv.org/abs/1512.02325>`_.
 
-Code is based on `NVIDIA Deep Learning Examples <https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/Detection/SSD>`_ and has been modified to use full DALI pipeline, it can be found in :fileref:`docs/examples/use_cases/pytorch/single_stage_detector/main.py`. 
+Code is based on `NVIDIA Deep Learning Examples <https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/Detection/SSD>`_ and has been modified to use full DALI pipeline, it can be found in :fileref:`docs/examples/use_cases/pytorch/single_stage_detector/main.py`.
 
-To run training on 8 GPUs using half-precission with COCO 2017 dataset under ``/coco`` use following command:
+To run training on 8 GPUs using half-precision with COCO 2017 dataset under ``/coco`` use following command:
 
 .. code-block:: bash
 
-   python -m torch.distributed.launch --nproc_per_node=8 ./main.py --warmup 300 --bs 64 --fp16 --data /coco/
+   torchrun --nproc_per_node=8 ./main.py --warmup 300 --bs 64 --fp16 --data /coco/
 
 
 Requirements
@@ -26,7 +26,8 @@ Requirements
       mkdir /coco; cd /coco
       curl -O http://images.cocodataset.org/zips/train2017.zip; unzip train2017.zip
       curl -O http://images.cocodataset.org/zips/val2017.zip; unzip val2017.zip
-      curl -O http://images.cocodataset.org/annotations/annotations_trainval2017.zip; unzip annotations_trainval2017.zip
+      curl -O http://images.cocodataset.org/annotations/annotations_trainval2017.zip
+      unzip annotations_trainval2017.zip
       cd $dir
 
 - Install packages listed below into your ``python`` interpreter:
@@ -46,7 +47,7 @@ Usage
                [--weight-decay WEIGHT_DECAY] [--warmup WARMUP]
                [--backbone {resnet18,resnet34,resnet50,resnet101,resnet152}]
                [--num-workers NUM_WORKERS] [--fp16-mode {off,static,amp}]
-               [--local_rank LOCAL_RANK] [--data_pipeline {dali,no_dali}]
+               [--data_pipeline {dali,no_dali}]
 
 All arguments with descriptions you can find in table below:
 
@@ -77,11 +78,9 @@ All arguments with descriptions you can find in table below:
 +---------------------------------------------+-----------------------------------------+
 | --num-workers NUM_WORKERS                   | number of worker threads                |
 +---------------------------------------------+-----------------------------------------+
-| --fp16-mode                                 | half precission mode to use             |
+| --fp16-mode                                 | enables half precision mode             |
 +---------------------------------------------+-----------------------------------------+
 | --target                                    | target mAP to assert against at the end |
-+---------------------------------------------+-----------------------------------------+
-| --local_rank LOCAL_RANK                     | local rank of current process           |
 +---------------------------------------------+-----------------------------------------+
 | --data_pipeline {dali,no_dali}              | data pipeline to use for training       |
 +---------------------------------------------+-----------------------------------------+

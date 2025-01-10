@@ -5,8 +5,7 @@ test_body() {
     "dali_core_test.bin" \
     "dali_kernel_test.bin" \
     "dali_test.bin" \
-    "dali_operator_test.bin" \
-    "dali_imgcodec_test.bin"
+    "dali_operator_test.bin"
   do
     for DIRNAME in \
       "../../build/dali/python/nvidia/dali" \
@@ -26,7 +25,7 @@ test_body() {
     # LMDB seems to be greedy when mmaps memory, disable it as well
     # for some reason mmap based test tends to fail on some runners due to disc issue, so
     # disable it for now
-    "$FULLPATH" --gtest_filter=-*mmap*:*LMDBTest*
+    DALI_USE_EXEC2=0 "$FULLPATH" --gtest_filter=-*mmap*:*LMDBTest*
   done
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@
 #include "dali/pipeline/data/backend.h"
 #include "dali/pipeline/data/tensor_list.h"
 #include "dali/pipeline/data/types.h"
+#include "dali/pipeline/operator/builtin/conditional/split_merge.h"
 #include "dali/pipeline/operator/op_spec.h"
 #include "dali/pipeline/operator/operator.h"
 #include "dali/pipeline/util/batch_utils.h"
@@ -96,7 +97,7 @@ class DLL_PUBLIC EagerOperator {
   using WSOutputType = typename Backend2Types<Backend>::WSOutputType;
 
  public:
-  DLL_PUBLIC inline EagerOperator(const OpSpec &spec) : EagerOperator(spec, spec.name()) {}
+  DLL_PUBLIC inline EagerOperator(const OpSpec &spec) : EagerOperator(spec, spec.SchemaName()) {}
 
   DLL_PUBLIC inline EagerOperator(const OpSpec &spec, std::string name)
       : EagerOperator(spec, std::move(name), GetSharedThreadPool()->NumThreads()) {}
@@ -159,7 +160,7 @@ class DLL_PUBLIC EagerOperator {
       int batch_size = -1);
 
   inline std::string ExtendErrorMsg(const std::string &backend, const char *what) {
-    return make_string("Error when executing ", backend, " operator ", op_spec_.name(),
+    return make_string("Error when executing ", backend, " operator ", op_spec_.SchemaName(),
                        ", instance name: \"", name_, "\", encountered:\n", what);
   }
 
@@ -270,9 +271,11 @@ EagerOperator<Backend>::RunImpl(
       batch_size = cur_batch_size;
     }
 
-    DALI_ENFORCE(cur_batch_size == batch_size,
-                 make_string("Expected uniform batch size in a single operator. Expected: ",
-                             batch_size, ", input ", in_idx, " batch size: ", cur_batch_size));
+    if (!IsSplitOrMerge(op_spec_.GetSchema())) {
+      DALI_ENFORCE(cur_batch_size == batch_size,
+                   make_string("Expected uniform batch size in a single operator. Expected: ",
+                               batch_size, ", input ", in_idx, " batch size: ", cur_batch_size));
+    }
     DALI_ENFORCE(
         cur_batch_size <= max_batch_size_,
         make_string("Expected batch size lower or equal to max batch size. Expected at most: ",
@@ -304,7 +307,7 @@ EagerOperator<Backend>::RunImpl(
   ws_.SetBatchSizes(batch_size);
 
   // Setup outputs.
-  if (op_->Setup(output_desc, ws_) && op_->CanInferOutputs()) {
+  if (op_->Setup(output_desc, ws_)) {
     for (size_t i = 0; i < num_outputs_; ++i) {
       ws_.Output<OutBackend>(i).Resize(output_desc[i].shape, output_desc[i].type,
                                                 BatchContiguity::Contiguous);
@@ -316,12 +319,13 @@ EagerOperator<Backend>::RunImpl(
   for (size_t i = 0; i < num_outputs_; ++i) {
     outputs[i] = AsContiguousOutput<OutBackend>(ws_.template OutputPtr<OutBackend>(i));
   }
-
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    int cur_batch_size = outputs[i]->num_samples();
-    DALI_ENFORCE(cur_batch_size == batch_size,
-                 make_string("Unexpected batch size for output ", i, ". Expected: ", batch_size,
-                             ", returned: ", cur_batch_size));
+  if (!IsSplitOrMerge(op_spec_.GetSchema())) {
+    for (size_t i = 0; i < outputs.size(); ++i) {
+      int cur_batch_size = outputs[i]->num_samples();
+      DALI_ENFORCE(cur_batch_size == batch_size,
+                  make_string("Unexpected batch size for output ", i, ". Expected: ", batch_size,
+                              ", returned: ", cur_batch_size));
+    }
   }
 
   return outputs;

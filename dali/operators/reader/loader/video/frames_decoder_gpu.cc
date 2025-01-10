@@ -331,7 +331,8 @@ void FramesDecoderGpu::InitBitStreamFilter() {
   }
 
   DALI_ENFORCE(
-    avcodec_parameters_copy(bsfc_->par_in, av_state_->ctx_->streams[0]->codecpar) >= 0,
+    avcodec_parameters_copy(bsfc_->par_in,
+                            av_state_->ctx_->streams[av_state_->stream_id_]->codecpar) >= 0,
     "Unable to copy bit stream filter parameters");
   DALI_ENFORCE(
     av_bsf_init(bsfc_) >= 0,
@@ -364,7 +365,11 @@ void FramesDecoderGpu::InitGpuParser() {
   InitBitStreamFilter();
 
   filtered_packet_ = av_packet_alloc();
-  DALI_ENFORCE(filtered_packet_, "Could not allocate av packet");
+  if (!filtered_packet_) {
+    DALI_WARN(make_string("Could not allocate av packet for \"", Filename(), "\""));
+    is_valid_ = false;
+    return;
+  }
 
   auto codec_type = GetCodecType();
 
@@ -380,8 +385,8 @@ void FramesDecoderGpu::InitGpuParser() {
   parser_info.pfnDecodePicture = frame_dec_gpu_impl::process_picture_decode;
   parser_info.pfnDisplayPicture = nullptr;
 
-  auto extradata = av_state_->ctx_->streams[0]->codecpar->extradata;
-  auto extradata_size = av_state_->ctx_->streams[0]->codecpar->extradata_size;
+  auto extradata = av_state_->ctx_->streams[av_state_->stream_id_]->codecpar->extradata;
+  auto extradata_size = av_state_->ctx_->streams[av_state_->stream_id_]->codecpar->extradata_size;
 
   memset(&parser_extinfo, 0, sizeof(parser_extinfo));
   parser_info.pExtVideoInfo = &parser_extinfo;
@@ -406,6 +411,9 @@ FramesDecoderGpu::FramesDecoderGpu(const std::string &filename, cudaStream_t str
     FramesDecoder(filename),
     frame_buffer_(num_decode_surfaces_),
     stream_(stream) {
+  if (!IsValid()) {
+    return;
+  }
   InitGpuParser();
 }
 
@@ -414,10 +422,13 @@ FramesDecoderGpu::FramesDecoderGpu(
   int memory_file_size,
   cudaStream_t stream,
   bool build_index,
-  int num_frames) :
-  FramesDecoder(memory_file, memory_file_size, build_index, build_index, num_frames),
-  frame_buffer_(num_decode_surfaces_),
-  stream_(stream) {
+  int num_frames,
+  std::string_view source_info):
+  FramesDecoder(memory_file, memory_file_size, build_index, build_index, num_frames, source_info),
+  frame_buffer_(num_decode_surfaces_), stream_(stream) {
+  if (!IsValid()) {
+    return;
+  }
   InitGpuParser();
 }
 
@@ -520,7 +531,7 @@ bool FramesDecoderGpu::ReadNextFrameWithIndex(uint8_t *data, bool copy_to_output
   for (auto &frame : frame_buffer_) {
     if (frame.pts_ != -1 && frame.pts_ == Index(next_frame_idx_).pts) {
       if (copy_to_output) {
-        copyD2D(data, frame.frame_.data(), FrameSize());
+        copyD2D(data, frame.frame_.data(), FrameSize(), stream_);
       }
       LOG_LINE << "Read frame, index " << next_frame_idx_ << ", timestamp " <<
         std::setw(5) << frame.pts_ << ", current copy " << copy_to_output << std::endl;
@@ -612,7 +623,8 @@ bool FramesDecoderGpu::ReadNextFrameWithoutIndex(uint8_t *data, bool copy_to_out
   // Initial fill of the buffer
   frame_returned_ = false;
   while (
-    HasEmptySlot() &&
+    // as we may enlarge the buffer make sure to not decode more than num_decode_surfaces_ frames
+    NumEmptySpots() > frame_buffer_.size() - num_decode_surfaces_ &&
     more_frames_to_decode_ &&
     !frame_returned_ &&
     frame_to_return_index == -1) {
@@ -670,7 +682,8 @@ bool FramesDecoderGpu::ReadNextFrameWithoutIndex(uint8_t *data, bool copy_to_out
   copyD2D(
     current_frame_output_,
     frame_buffer_[frame_to_return_index].frame_.data(),
-    FrameSize());
+    FrameSize(),
+    stream_);
   LOG_LINE << "Read frame, index " << next_frame_idx_ << ", timestamp " <<
           std::setw(5) << frame_buffer_[frame_to_return_index].pts_ <<
           ", current copy " << copy_to_output << std::endl;
@@ -727,7 +740,19 @@ BufferedFrame& FramesDecoderGpu::FindEmptySlot() {
       return frame;
     }
   }
-  DALI_FAIL("Could not find empty slot in the frame buffer");
+
+  // in some cases we may decode more than one frame after receiving one packet
+  // frame N-1 may require packet N and N-1, and in results after submitting packet N we
+  // will get frame N-1 and N but the buffer may have space only for 1 frame
+  std::vector<BufferedFrame> new_frame_buffer(frame_buffer_.size() + 1);
+  for (size_t i = 0; i < frame_buffer_.size(); ++i) {
+    new_frame_buffer[i] = std::move(frame_buffer_[i]);
+  }
+  frame_buffer_ = std::move(new_frame_buffer);
+  auto &new_frame = frame_buffer_.back();
+  new_frame.frame_.resize(FrameSize());
+  new_frame.pts_ = -1;
+  return new_frame;
 }
 
 bool FramesDecoderGpu::HasEmptySlot() const {
@@ -768,8 +793,8 @@ void FramesDecoderGpu::Reset() {
 }
 
 FramesDecoderGpu::~FramesDecoderGpu() {
-  av_packet_free(&filtered_packet_);
-  av_bsf_free(&bsfc_);
+  if (filtered_packet_) av_packet_free(&filtered_packet_);
+  if (bsfc_) av_bsf_free(&bsfc_);
 }
 
 bool FramesDecoderGpu::SupportsHevc() {

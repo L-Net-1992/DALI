@@ -1,4 +1,4 @@
-// Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include "dali/core/span.h"
 #include "dali/kernels/imgproc/color_manipulation/debayer/debayer.h"
+#include "dali/pipeline/operator/checkpointing/stateless_operator.h"
 #include "dali/pipeline/operator/common.h"
 #include "dali/pipeline/operator/op_spec.h"
 #include "dali/pipeline/operator/operator.h"
@@ -99,10 +100,11 @@ class DebayerImplBase {
 
 
 template <typename Backend>
-class Debayer : public SequenceOperator<Backend> {
+class Debayer : public SequenceOperator<Backend, StatelessOperator> {
  public:
+  using Base = SequenceOperator<Backend, StatelessOperator>;
   explicit Debayer(const OpSpec &spec)
-      : SequenceOperator<Backend>(spec),
+      : Base(spec),
         alg_{debayer::parse_algorithm_name(spec.GetArgument<std::string>(debayer::kAlgArgName))} {
     if (!spec_.HasTensorArgument(debayer::kBluePosArgName)) {
       std::vector<int> blue_pos;
@@ -122,10 +124,6 @@ class Debayer : public SequenceOperator<Backend> {
     output_desc[0].type = ws.GetInputDataType(0);
     output_desc[0].shape = debayer::infer_output_shape(input_shape);
     AcquirePatternArgument(ws, input_shape.num_samples());
-    return true;
-  }
-
-  bool CanInferOutputs() const override {
     return true;
   }
 

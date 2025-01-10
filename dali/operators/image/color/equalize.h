@@ -21,13 +21,14 @@
 #include "dali/pipeline/operator/op_spec.h"
 #include "dali/pipeline/operator/operator.h"
 #include "dali/pipeline/operator/sequence_operator.h"
+#include "dali/pipeline/operator/checkpointing/stateless_operator.h"
 
 namespace dali {
 
 template <typename Backend>
-class Equalize : public SequenceOperator<Backend> {
+class Equalize : public SequenceOperator<Backend, StatelessOperator> {
  public:
-  explicit Equalize(const OpSpec &spec) : SequenceOperator<Backend>(spec) {}
+  explicit Equalize(const OpSpec &spec) : SequenceOperator<Backend, StatelessOperator>(spec) {}
 
  protected:
   DISABLE_COPY_MOVE_ASSIGN(Equalize);
@@ -36,12 +37,13 @@ class Equalize : public SequenceOperator<Backend> {
  protected:
   bool SetupImpl(std::vector<OutputDesc> &output_desc, const Workspace &ws) override {
     output_desc.resize(1);
-    output_desc[0].type = ws.GetInputDataType(0);
-    // output_desc[0].shape is set by ProcessOutputDesc
-    return true;
-  }
+    auto input_type = ws.GetInputDataType(0);
+    DALI_ENFORCE(input_type == type2id<uint8_t>::value,
+                 make_string("Unsupported input type for equalize operator: ", input_type,
+                             ". Expected input type: `uint8_t`."));
 
-  bool CanInferOutputs() const override {
+    output_desc[0].type = input_type;
+    // output_desc[0].shape is set by ProcessOutputDesc
     return true;
   }
 

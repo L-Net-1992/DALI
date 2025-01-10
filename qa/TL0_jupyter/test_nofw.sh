@@ -1,6 +1,6 @@
 #!/bin/bash -e
 # used pip packages
-pip_packages='jupyter numpy matplotlib<3.5.3 pillow opencv-python librosa==0.8.1 simpleaudio'
+pip_packages='jupyter numpy matplotlib<3.5.3 pillow opencv-python librosa simpleaudio'
 target_dir=./docs/examples
 
 do_once() {
@@ -15,7 +15,7 @@ test_body() {
     # test all jupyters except one related to a particular FW,
     # and one requiring a dedicated HW (multiGPU, GDS and OF)
     # optical flow requires TU102 architecture whilst this test can be run on any GPU
-    exclude_files="multigpu\|mxnet\|tensorflow\|pytorch\|paddle\|external_input.ipynb\|numpy_reader.ipynb\|webdataset-externalsource.ipynb\|optical_flow\|python_operator\|#"
+    exclude_files="multigpu\|mxnet\|tensorflow\|pytorch\|paddle\|jax\|external_input.ipynb\|numpy_reader.ipynb\|webdataset-externalsource.ipynb\|optical_flow\|python_operator\|#"
 
     find * -name "*.ipynb" | sed "/${exclude_files}/d" | xargs -i jupyter nbconvert \
                     --to notebook --inplace --execute \

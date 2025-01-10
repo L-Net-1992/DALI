@@ -15,8 +15,6 @@
 #ifndef DALI_OPERATORS_INPUT_VIDEO_INPUT_H_
 #define DALI_OPERATORS_INPUT_VIDEO_INPUT_H_
 
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
 #include <deque>
 #include <string>
 #include <utility>
@@ -84,10 +82,6 @@ inline auto DetermineBatchOutline(int num_frames, int frames_per_sequence, int b
 template<typename OutBackend, typename PadType>
 struct PadFrameCreator {
   static constexpr bool is_cpu = std::is_same_v<OutBackend, CPUBackend>;
-
-  template<typename T>
-  using container_type =
-          std::conditional_t<is_cpu, thrust::host_vector<T>, thrust::device_vector<T>>;
 
   PadFrameCreator() = default;
 
@@ -164,10 +158,6 @@ class VideoInput : public VideoDecoderBase<Backend, FramesDecoder>, public Input
     }
   }
 
-
-  bool CanInferOutputs() const override {
-    return true;
-  }
 
 
   int NextBatchSize() override {
@@ -390,6 +380,9 @@ void VideoInput<Backend, FramesDecoder>::VideoInputRunImpl(Workspace &ws) {
     }
   }
 
+  // If true, this operator can be run again, after this Run.
+  bool will_return_next = true;
+
   // There won't be any more output using the current input.
   bool input_sample_depleted = !full_sequence || frames_decoders_[0]->NextFrameIdx() == -1;
 
@@ -402,12 +395,15 @@ void VideoInput<Backend, FramesDecoder>::VideoInputRunImpl(Workspace &ws) {
        * "next_output_data_id" trace.
        */
       LoadDataFromInputOperator(GetThreadPool(ws));
+    } else {
+      will_return_next = false;
     }
   }
 
   if (data_id_) {
     SetNextDataIdTrace(ws, *data_id_);
   }
+  InputOperator<Backend>::SetDepletedOperatorTrace(ws, !will_return_next);
 }
 
 }  // namespace dali
