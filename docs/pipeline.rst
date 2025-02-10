@@ -33,7 +33,8 @@ Example::
 
     @pipeline_def  # create a pipeline with processing graph defined by the function below
     def my_pipeline():
-        """ Create a pipeline which reads images and masks, decodes the images and returns them. """
+        """ Create a pipeline which reads images and masks, decodes the images and
+            returns them. """
         img_files, labels = fn.readers.file(file_root="image_dir", seed=1)
         mask_files, _ = fn.readers.file(file_root="mask_dir", seed=1)
         images = fn.decoders.image(img_files, device="mixed")
@@ -41,7 +42,6 @@ Example::
         return images, masks, labels
 
     pipe = my_pipeline(batch_size=4, num_threads=2, device_id=0)
-    pipe.build()
 
 
 The resulting graph is:
@@ -49,6 +49,13 @@ The resulting graph is:
 .. image:: images/two_readers.svg
 
 .. _processing_graph_structure:
+
+.. important::
+    The pipeline definition function is excuted only once, when the pipeline is built,
+    and typically returns a ``dali.DataNode`` object or a tuple of thereof.
+    For convenience, it's possible to return other types, such as NumPy arrays, but those
+    are treated as constants and evaluated only once.
+
 
 Processing Graph Structure
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -93,7 +100,6 @@ Example::
         return flipped, labels.gpu()
 
     pipe = my_pipeline(batch_size=4, num_threads=2, device_id=0)
-    pipe.build()
 
 .. note::
     If the ``device`` parameter is not specified, it is selected automatically based on the
@@ -129,9 +135,6 @@ to the previous one::
 
     pipe = my_pipe(my_source)
 
-.. autoclass:: Pipeline
-   :members:
-   :special-members: __enter__, __exit__
 
 .. _pipeline_decorator:
 
@@ -139,6 +142,60 @@ Pipeline Decorator
 ------------------
 .. autodecorator:: pipeline_def
 
+
+.. _conditional_execution:
+
+Conditional Execution
+---------------------
+
+DALI allows to execute operators conditionally for selected samples within the batch using
+``if`` statements. To enable this feature use the
+:py:func:`@pipeline_def <nvidia.dali.pipeline_def>` decorator to define the pipeline and
+set ``enable_conditionals`` to ``True``.
+
+Every ``if`` statement that have a :meth:`~nvidia.dali.pipeline.DataNode` as a condition
+will be recognized as DALI conditional statement.
+
+For example, this pipeline rotates each image with probability of 25% by a random angle between
+10 and 30 degrees::
+
+    @pipeline_def(enable_conditionals=True)
+    def random_rotate():
+        jpegs, _ = fn.readers.file(device="cpu", file_root=images_dir)
+        images = fn.decoders.image(jpegs, device="mixed")
+        do_rotate = fn.random.coin_flip(probability=0.25, dtype=DALIDataType.BOOL)
+        if do_rotate:
+            result = fn.rotate(images, angle=fn.random.uniform(range=(10, 30)), fill_value=0)
+        else:
+            result = images
+        return result
+
+The semantics of DALI conditionals can be understood as if the code processed one sample at a time.
+
+The condition must be represented by scalar samples - that is have a 0-d shape. It can be either
+boolean or any numerical type supported by DALI - in the latter case, non-zero values are considered
+True and zero values considered False, in accordance with typical Python semantics.
+
+Additionally, logical expressions ``and``, ``or``, and ``not`` can be used on
+:meth:`~nvidia.dali.pipeline.DataNode`. The first two are restricted to boolean inputs, ``not``
+allows the same input types as ``if`` statement condition. Logical expression follow the
+shortcutting rules when they are evaluated.
+
+You can read more in the `conditional tutorial <examples/general/conditionals.html>`_.
+
+Preventing AutoGraph conversion
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autodecorator:: nvidia.dali.pipeline.do_not_convert
+
+.. _pipeline_class:
+
+Pipeline class
+--------------
+
+.. autoclass:: Pipeline
+   :members:
+   :special-members: __enter__, __exit__
 
 DataNode
 --------
@@ -151,35 +208,6 @@ Some additional experimental features can be enabled via the special variant of 
 decorator.
 
 .. autodecorator:: nvidia.dali.pipeline.experimental.pipeline_def
-
-
-Conditional Execution (experimental)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-DALI allows to execute operators conditionally for selected samples within the batch using
-``if`` statements. To enable this feature use the
-:py:func:`experimental @pipeline_def <nvidia.dali.pipeline.experimental.pipeline_def>` variant of
-decorator with the pipeline definition and set ``enable_conditionals`` to ``True``.
-
-Every ``if`` statement that have a :meth:`~nvidia.dali.pipeline.DataNode` as a condition
-will be recognized as DALI conditional statement.
-
-For example, this pipeline rotates each image with probabilty of 25% by a random angle between
-10 and 30 degrees::
-
-    @experimental.pipeline_def(enable_conditionals=True)
-    def random_rotate():
-        jpegs, _ = fn.readers.file(device="cpu", file_root=images_dir)
-        images = fn.decoders.image(jpegs, device="mixed")
-        do_rotate = fn.random.coin_flip(probability=0.25, dtype=DALIDataType.BOOL)
-        if do_rotate:
-            result = fn.rotate(images, angle=fn.random.uniform(range=(10, 30)), fill_value=0)
-        else:
-            result = images
-        return result
-
-The semantics of DALI conditionals can be understood as if the code processed one sample at a time.
-You can read more in the `conditional tutorial <examples/general/conditionals.html>`_.
 
 
 Pipeline Debug Mode (experimental)

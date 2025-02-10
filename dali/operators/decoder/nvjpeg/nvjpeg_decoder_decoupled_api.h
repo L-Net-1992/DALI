@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,30 +15,32 @@
 #ifndef DALI_OPERATORS_DECODER_NVJPEG_NVJPEG_DECODER_DECOUPLED_API_H_
 #define DALI_OPERATORS_DECODER_NVJPEG_NVJPEG_DECODER_DECOUPLED_API_H_
 
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
-#include <memory>
-#include <numeric>
-#include <atomic>
-#include "dali/pipeline/operator/operator.h"
+#include "dali/core/cuda_event.h"
+#include "dali/core/cuda_stream_pool.h"
+#include "dali/core/dev_buffer.h"
+#include "dali/core/device_guard.h"
+#include "dali/core/mm/memory.h"
+#include "dali/core/nvtx.h"
+#include "dali/core/static_switch.h"
+#include "dali/operators/decoder/image/image_factory.h"
+#include "dali/operators/decoder/cache/cached_decoder_impl.h"
+#include "dali/operators/decoder/nvjpeg/nvjpeg2k_helper.h"
 #include "dali/operators/decoder/nvjpeg/nvjpeg_helper.h"
 #include "dali/operators/decoder/nvjpeg/nvjpeg_memory.h"
-#include "dali/operators/decoder/nvjpeg/nvjpeg2k_helper.h"
-#include "dali/operators/decoder/cache/cached_decoder_impl.h"
-#include "dali/core/mm/memory.h"
-#include "dali/core/cuda_stream_pool.h"
-#include "dali/core/cuda_event.h"
-#include "dali/core/dev_buffer.h"
-#include "dali/core/static_switch.h"
-#include "dali/util/image.h"
-#include "dali/util/ocv.h"
-#include "dali/util/nvml.h"
-#include "dali/image/image_factory.h"
-#include "dali/pipeline/util/thread_pool.h"
-#include "dali/core/device_guard.h"
 #include "dali/operators/decoder/nvjpeg/permute_layout.h"
+#include "dali/pipeline/operator/checkpointing/stateless_operator.h"
+#include "dali/pipeline/operator/operator.h"
+#include "dali/pipeline/util/thread_pool.h"
+#include "dali/util/image.h"
+#include "dali/util/nvml.h"
+#include "dali/util/ocv.h"
 
 #define NVJPEG_FLAT_VERSION(major, minor, patch) ((major)*1000000+(minor)*1000+(patch))
 
@@ -52,18 +54,22 @@
   #define IS_HW_DECODER_COMPATIBLE 0
 #endif
 
+// nvjpeg dynlink wrapper, or true if linking statically
+bool nvjpegIsSymbolAvailable(const char *name);
+
 namespace dali {
 
 using ImageInfo = EncodedImageInfo<int>;
 
-class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
+class nvJPEGDecoder : public StatelessOperator<MixedBackend>, CachedDecoderImpl {
  public:
   explicit nvJPEGDecoder(const OpSpec& spec) :
-    Operator<MixedBackend>(spec),
+    StatelessOperator<MixedBackend>(spec),
     CachedDecoderImpl(spec),
     output_image_type_(spec.GetArgument<DALIImageType>("output_type")),
     hybrid_huffman_threshold_(spec.GetArgument<unsigned int>("hybrid_huffman_threshold")),
     use_fast_idct_(spec.GetArgument<bool>("use_fast_idct")),
+    use_jpeg_fancy_upsampling_(spec.GetArgument<bool>("jpeg_fancy_upsampling")),
     output_shape_(max_batch_size_, kOutputDim),
     pinned_buffers_(num_threads_*2),
     jpeg_streams_(num_threads_*2),
@@ -95,6 +101,13 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
     // TODO(ktokarski) TODO(jlisiecki) For now it is unused,
     // adjust NVJPEG to (full capacity of) H100
     (void) num_hw_engines_;
+    unsigned int nvjpeg_flags = 0;
+#ifdef NVJPEG_FLAGS_UPSAMPLING_WITH_INTERPOLATION
+    if (use_jpeg_fancy_upsampling_ && nvjpegGetVersion() >= 12001) {
+      nvjpeg_flags |= NVJPEG_FLAGS_UPSAMPLING_WITH_INTERPOLATION;
+    }
+#endif
+
 #if IS_HW_DECODER_COMPATIBLE
     // if hw_decoder_load is not present in the schema (crop/sliceDecoder) then it is not supported
     bool try_init_hw_decoder = false;
@@ -105,19 +118,19 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
       hw_decoder_load_ = 0;
     }
 
-    if (try_init_hw_decoder &&
-        nvjpegCreate(NVJPEG_BACKEND_HARDWARE, NULL, &handle_) == NVJPEG_STATUS_SUCCESS) {
+    if (try_init_hw_decoder && nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE, NULL, NULL, nvjpeg_flags,
+                                              &handle_) == NVJPEG_STATUS_SUCCESS) {
     // disable HW decoder for drivers < 455.x as the memory pool for it is not available
     // and multi GPU performance is far from perfect due to frequent memory allocations
 #if NVML_ENABLED
-      nvml::Init();
+      nvml_handle_ = nvml::NvmlInstance::CreateNvmlInstance();
       float driverVersion = nvml::GetDriverVersion();
       if (driverVersion < 455) {
         try_init_hw_decoder = false,
         hw_decoder_load_ = 0;
         CUDA_CALL(nvjpegDestroy(handle_));
         LOG_LINE << "NVJPEG_BACKEND_HARDWARE is disabled due to performance reason" << std::endl;
-        CUDA_CALL(nvjpegCreateSimple(&handle_));
+        CUDA_CALL(nvjpegCreateEx(NVJPEG_BACKEND_DEFAULT, NULL, NULL, nvjpeg_flags, &handle_));
         DALI_WARN("Due to performance reason HW NVJPEG decoder is disabled for the driver "
                   "older than 455.x");
       } else {
@@ -182,10 +195,10 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
 #endif
     } else {
       LOG_LINE << "NVJPEG_BACKEND_HARDWARE is either disabled or not supported" << std::endl;
-      CUDA_CALL(nvjpegCreateSimple(&handle_));
+      CUDA_CALL(nvjpegCreateEx(NVJPEG_BACKEND_DEFAULT, NULL, NULL, nvjpeg_flags, &handle_));
     }
 #else
-    CUDA_CALL(nvjpegCreateSimple(&handle_));
+    CUDA_CALL(nvjpegCreateEx(NVJPEG_BACKEND_DEFAULT, NULL, NULL, nvjpeg_flags, &handle_));
 #endif
 
     size_t device_memory_padding = spec.GetArgument<Index>("device_memory_padding");
@@ -288,9 +301,6 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
     try {
       DeviceGuard g(device_id_);
 
-#if NVML_ENABLED
-      nvml::Shutdown();
-#endif
       if (hw_decode_stream_)
         CUDA_CALL(cudaStreamSynchronize(hw_decode_stream_));
 
@@ -347,14 +357,15 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
     return false;
   }
 
-  using dali::OperatorBase::Run;
-  void Run(Workspace &ws) override {
-    SetupSharedSampleParams(ws);
+  void RunImpl(Workspace &ws) override {
+    SetupCropParams(ws);
     ParseImagesInfo(ws);
     ProcessImages(ws);
   }
 
  protected:
+  virtual void SetupCropParams(Workspace &ws) {}
+
   virtual CropWindowGenerator GetCropWindowGenerator(int data_idx) const {
     return {};
   }
@@ -567,6 +578,7 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
     samples_jpeg2k_.clear();
 #endif  // NVJPEG2K_ENABLED
 
+    DomainTimeRange tr("[DALI] ParseImagesInfo", DomainTimeRange::kBlue1);
     const auto &input = ws.Input<CPUBackend>(0);
     for (int i = 0; i < curr_batch_size; i++) {
       auto *input_data = input.tensor<uint8_t>(i);
@@ -589,8 +601,8 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
 
         int widths[NVJPEG_MAX_COMPONENT], heights[NVJPEG_MAX_COMPONENT], c;
         nvjpegChromaSubsampling_t subsampling;
-        nvjpegStatus_t ret = nvjpegGetImageInfo(handle_, input_data, in_size, &c,
-                                                &subsampling, widths, heights);
+        nvjpegStatus_t ret;
+        ret = nvjpegGetImageInfo(handle_, input_data, in_size, &c, &subsampling, widths, heights);
         bool hw_decode = false;
         bool nvjpeg_decode = (ret == NVJPEG_STATUS_SUCCESS);
 
@@ -605,7 +617,7 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
             auto image = ImageFactory::CreateImage(input_data, in_size, output_image_type_);
             data.shape = image->PeekShape();
           } catch (const std::runtime_error &e) {
-            DALI_FAIL(e.what() + ". File: " + data.file_name);
+            DALI_FAIL(e.what(), ". File: ", data.file_name);
           }
         }
         data.req_nchannels = NumberOfChannels(output_image_type_, data.shape[2]);
@@ -852,8 +864,11 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
       int max_cpu_threads = 1;
 
       nvjpegOutputFormat_t format = GetFormat(output_image_type_);
-      CUDA_CALL(nvjpegDecodeBatchedInitialize(handle_, state, samples_hw_batched_.size(),
-                                                max_cpu_threads, format));
+      {
+        DomainTimeRange tr("[DALI] nvjpegDecodeBatchedInitialize", DomainTimeRange::kBlue1);
+        CUDA_CALL(nvjpegDecodeBatchedInitialize(handle_, state, samples_hw_batched_.size(),
+                                                  max_cpu_threads, format));
+      }
 
       in_data_.resize(samples_hw_batched_.size());
       in_lengths_.resize(samples_hw_batched_.size());
@@ -886,6 +901,7 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
           in_data_[k] = static_cast<unsigned char*>(tv.raw_mutable_tensor(k));
         }
       } else {
+        DomainTimeRange tr("[DALI] Copy", DomainTimeRange::kBlue1);
         hw_decoder_images_staging_.Copy(tv);
         for (size_t k = 0; k < samples_hw_batched_.size(); ++k) {
           in_data_[k] = hw_decoder_images_staging_.mutable_tensor<uint8_t>(k);
@@ -894,10 +910,12 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
       // if nvjpegDecodeBatchedSupportedEx is available nvjpegDecodeBatchedEx should be as well,
       // otherwise no ROI should be provided anyway so we can safely call nvjpegDecodeBatched
       if (nvjpegIsSymbolAvailable("nvjpegDecodeBatchedEx")) {
+        DomainTimeRange tr("[DALI] nvjpegDecodeBatchedEx", DomainTimeRange::kBlue1);
         CUDA_CALL(nvjpegDecodeBatchedEx(handle_, state, in_data_.data(), in_lengths_.data(),
                                         nvjpeg_destinations_.data(), nvjpeg_params_.data(),
                                         hw_decode_stream_));
       } else {
+        DomainTimeRange tr("[DALI] nvjpegDecodeBatched", DomainTimeRange::kBlue1);
         CUDA_CALL(nvjpegDecodeBatched(handle_, state, in_data_.data(), in_lengths_.data(),
                                       nvjpeg_destinations_.data(), hw_decode_stream_));
       }
@@ -975,6 +993,8 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
   // with libjpeg.
   void SampleWorker(int sample_idx, string file_name, int in_size, int thread_id,
                     const uint8_t* input_data, uint8_t* output_data, cudaStream_t stream) {
+    DomainTimeRange tr("[DALI] decode " + std::to_string(sample_idx), DomainTimeRange::kBlue1);
+
     SampleData &data = sample_data_[sample_idx];
     assert(data.method != DecodeMethod::Host);
 
@@ -990,12 +1010,19 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
 
     CUDA_CALL(nvjpegStateAttachPinnedBuffer(state, pinned_buffers_[buff_idx]));
 
-    nvjpegStatus_t ret = nvjpegJpegStreamParse(handle_, input_data, in_size, false, false,
-                                               jpeg_streams_[jpeg_stream_idx]);
-
+    nvjpegStatus_t ret;
+    {
+      DomainTimeRange tr("[DALI] nvjpegJpegStreamParse", DomainTimeRange::kBlue1);
+      ret = nvjpegJpegStreamParse(handle_, input_data, in_size, false, false,
+                                  jpeg_streams_[jpeg_stream_idx]);
+    }
     // If nvjpegJpegStreamParse failed we can skip nvjpeg's host decode step and
     // rely on the host decoder fallback
     if (ret == NVJPEG_STATUS_SUCCESS) {
+      bool is_gpu_hybrid = data.selected_decoder == &(data.decoders[NVJPEG_BACKEND_GPU_HYBRID]);
+      DomainTimeRange tr(
+          "[DALI] nvjpegDecodeJpegHost is_gpu_hybrid=" + std::to_string(is_gpu_hybrid),
+          DomainTimeRange::kBlue1);
       ret = nvjpegDecodeJpegHost(handle_, decoder, state, data.params,
                                  jpeg_streams_[jpeg_stream_idx]);
     }
@@ -1030,7 +1057,10 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
                                                       jpeg_streams_[jpeg_stream_idx], stream),
                      file_name);
 
-      ret = nvjpegDecodeJpegDevice(handle_, decoder, state, &nvjpeg_image, stream);
+      {
+        DomainTimeRange tr("[DALI] nvjpegDecodeJpegDevice", DomainTimeRange::kBlue1);
+        ret = nvjpegDecodeJpegDevice(handle_, decoder, state, &nvjpeg_image, stream);
+      }
 
       // if nvJPEG fails try HostDecoder
       if (ret != NVJPEG_STATUS_SUCCESS) {
@@ -1064,7 +1094,8 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
   DALIImageType output_image_type_;
 
   unsigned int hybrid_huffman_threshold_;
-  bool use_fast_idct_;
+  bool use_fast_idct_ = false;
+  bool use_jpeg_fancy_upsampling_ = false;
 
   TensorListShape<> output_shape_;
 
@@ -1176,6 +1207,10 @@ class nvJPEGDecoder : public Operator<MixedBackend>, CachedDecoderImpl {
   int64_t task_priority_seq_ = 0;
   unsigned int num_hw_engines_ = 1;
   unsigned int num_hw_cores_per_engine_ = 1;
+
+#if NVML_ENABLED
+  nvml::NvmlInstance nvml_handle_;
+#endif
 };
 
 }  // namespace dali

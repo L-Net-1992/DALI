@@ -1,4 +1,4 @@
-// Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include "dali/core/boundary.h"
 #include "dali/core/common.h"
 #include "dali/core/static_switch.h"
+#include "dali/pipeline/operator/checkpointing/stateless_operator.h"
 #include "dali/pipeline/operator/common.h"
 #include "dali/pipeline/operator/operator.h"
 #include "dali/pipeline/operator/sequence_operator.h"
@@ -30,12 +31,12 @@
 
 namespace dali {
 
-#define FILTER_INPUT_SUPPORTED_TYPES \
-  (uint8_t, int8_t, uint16_t, int16_t, float16, float)
+#define FILTER_INPUT_SUPPORTED_TYPES_CPU (uint8_t, uint16_t, int16_t, float)
+#define FILTER_INPUT_SUPPORTED_TYPES_GPU (uint8_t, int8_t, uint16_t, int16_t, float16, float)
 
 #define FILTER_KERNEL_SUPPORTED_TYPES (float)
 
-#define FILTER_INPUT_SUPPORTED_SPATIAL_NDIM (2, 3)
+#define FILTER_INPUT_SUPPORTED_SPATIAL_NDIM_GPU (2, 3)
 
 namespace filter {
 using namespace boundary;  // NOLINT(build/namespaces)
@@ -169,10 +170,11 @@ TensorListView<detail::storage_tag_map_t<Backend>, const In, 0> get_fill_values_
 }  // namespace filter
 
 template <typename Backend>
-class Filter : public SequenceOperator<Backend> {
+class Filter : public SequenceOperator<Backend, StatelessOperator> {
  public:
+  using Base = SequenceOperator<Backend, StatelessOperator>;
   inline explicit Filter(const OpSpec& spec)
-      : SequenceOperator<Backend>(spec),
+      : Base(spec),
         is_valid_mode_{filter::parse_is_valid_mode(spec.GetArgument<std::string>("mode"))} {
     spec.TryGetArgument(dtype_, "dtype");
   }
@@ -180,11 +182,26 @@ class Filter : public SequenceOperator<Backend> {
   DISABLE_COPY_MOVE_ASSIGN(Filter);
 
  protected:
-  bool CanInferOutputs() const override {
-    return true;
+  bool ShouldExpand(const Workspace& ws) override {
+    const auto& input_layout = ws.GetInputLayout(0);
+    int frame_idx = VideoLayoutInfo::FrameDimIndex(input_layout);
+    DALI_ENFORCE(frame_idx == -1 || frame_idx == 0,
+                 make_string("When the input is video-like (i.e. contains frames), the frames must "
+                             "be an outermost dimension. However, got input with `",
+                             input_layout, "` layout."));
+    auto input_sample_dim = ws.GetInputShape(0).sample_dim();
+    input_desc_ = filter::setup_input_desc(input_layout, input_sample_dim, is_valid_mode_);
+    // Pass to the kernel less samples (i.e. sequences not split into frames)
+    // when there are no per-frame arguments, to reduce the number of instances of
+    // per-sample data-structure when they are not needed.
+    bool should_expand =
+        Base::ShouldExpand(ws) && (HasPerFramePositionalArgs(ws) || Base::HasPerFrameArgInputs(ws));
+    if (should_expand && input_layout.size() && input_layout[0] == 'F') {
+      assert(input_desc_.num_seq_dims >= 1);
+      input_desc_.num_seq_dims--;
+    }
+    return should_expand;
   }
-
-  bool ShouldExpand(const Workspace& ws) override;
 
   template <typename Out, typename In, typename W>
   std::unique_ptr<OpImplBase<Backend>> GetFilterImpl(const OpSpec& spec_,
@@ -198,25 +215,23 @@ class Filter : public SequenceOperator<Backend> {
       DALI_ENFORCE(dtype == input_type || dtype == filter_type,
                    "Output data type must be same as input, FLOAT or skipped (defaults to "
                    "input type)");
-      const auto& input_layout = GetInputLayout(ws, 0);
-      auto input_sample_dim = ws.GetInputShape(0).sample_dim();
-      auto input_desc = filter::setup_input_desc(input_layout, input_sample_dim, is_valid_mode_);
       const auto& filter_shape = ws.GetInputShape(1);
       auto filter_ndim = filter_shape.sample_dim();
-      DALI_ENFORCE(filter_ndim == input_desc.axes,
+      DALI_ENFORCE(filter_ndim == input_desc_.axes,
                    make_string("Filter dimensionality must match the number of spatial dimensions "
                                "in the input samples. Got ",
-                               input_desc.axes, " spatial dimensions but the filter is ",
+                               input_desc_.axes, " spatial dimensions but the filter is ",
                                filter_ndim, " dimensional."));
-      TYPE_SWITCH(input_type, type2id, In, FILTER_INPUT_SUPPORTED_TYPES, (
+      InputTypeSwitch<Backend>(input_type, [&](auto in) {
+        using In = decltype(in);
         TYPE_SWITCH(filter_type, type2id, W, FILTER_KERNEL_SUPPORTED_TYPES, (
           if (dtype == input_type) {
-            impl_ = GetFilterImpl<In, In, W>(spec_, input_desc);
+            impl_ = GetFilterImpl<In, In, W>(spec_, input_desc_);
           } else {
-            impl_ = GetFilterImpl<W, In, W>(spec_, input_desc);
+            impl_ = GetFilterImpl<W, In, W>(spec_, input_desc_);
           }
         ), DALI_FAIL(make_string("Unsupported filter type: ", filter_type, ".")));  // NOLINT
-      ), DALI_FAIL(make_string("Unsupported input type: ", input_type, ".")));  // NOLINT
+      });
     }
     return impl_->SetupImpl(output_desc, ws);
   }
@@ -227,7 +242,7 @@ class Filter : public SequenceOperator<Backend> {
 
   bool HasPerFrameFilters(const Workspace& ws) {
     auto filter_dim = ws.GetInputDim(1);
-    const auto& filter_layout = GetInputLayout(ws, 1);
+    const auto& filter_layout = ws.GetInputLayout(1);
     return filter_dim == 3 && filter_layout.size() == 3 && filter_layout[0] == 'F';
   }
 
@@ -235,7 +250,7 @@ class Filter : public SequenceOperator<Backend> {
     if (ws.NumInput() < 3) {
       return false;
     }
-    const auto& layout = GetInputLayout(ws, 2);
+    const auto& layout = ws.GetInputLayout(2);
     return layout.size() == 1 && layout[0] == 'F';
   }
 
@@ -244,6 +259,23 @@ class Filter : public SequenceOperator<Backend> {
   }
 
  private:
+  template <typename Backend_, typename Cb>
+  std::enable_if_t<std::is_same_v<Backend_, GPUBackend>> InputTypeSwitch(DALIDataType in_type,
+                                                                         Cb cb) {
+    TYPE_SWITCH(in_type, type2id, In, FILTER_INPUT_SUPPORTED_TYPES_GPU, (
+      cb(In{});
+    ), DALI_FAIL(make_string("Filter GPU does not support input type ", in_type, ".")));  // NOLINT
+  }
+
+  template <typename Backend_, typename Cb>
+  std::enable_if_t<std::is_same_v<Backend_, CPUBackend>> InputTypeSwitch(DALIDataType in_type,
+                                                                         Cb cb) {
+    TYPE_SWITCH(in_type, type2id, In, FILTER_INPUT_SUPPORTED_TYPES_CPU, (
+      cb(In{});
+    ), DALI_FAIL(make_string("Filter CPU does not support input type ", in_type, ".")));  // NOLINT
+  }
+
+  filter::InputDesc input_desc_;
   bool is_valid_mode_;
   DALIDataType dtype_ = DALI_NO_TYPE;
   std::unique_ptr<OpImplBase<Backend>> impl_ = nullptr;

@@ -379,12 +379,27 @@ static void ReleaseUnusedTestImpl(ssize_t max_alloc_size = std::numeric_limits<s
 }
 
 TEST(MMDefaultResource, ReleaseUnusedBasic) {
+  cudaDeviceProp device_prop;
+  CUDA_CALL(cudaGetDeviceProperties(&device_prop, 0));
+  if (device_prop.integrated)
+    GTEST_SKIP() << "The memory usage on integrated GPUs cannot be reliably tracked.";
+
+  auto *res = mm::GetDefaultResource<mm::memory_kind::device>();
+  auto *pool = GetPoolInterface(res);
+  if (!pool)
+    GTEST_SKIP() << "No memory pool in use - cannot test pool releasing of unused memory.";
+
   ReleaseUnusedTestImpl(256 << 20);
 }
 
 TEST(MMDefaultResource, ReleaseUnusedMaxMem) {
   if (!UseVMM())
     GTEST_SKIP() << "Cannot reliably test ReleaseUnused with max mem usage without VMM support";
+
+  cudaDeviceProp device_prop;
+  CUDA_CALL(cudaGetDeviceProperties(&device_prop, 0));
+  if (device_prop.integrated)
+    GTEST_SKIP() << "The memory usage on integrated GPUs cannot be reliably tracked.";
 
   ReleaseUnusedTestImpl();
 }
