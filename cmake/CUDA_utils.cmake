@@ -39,19 +39,19 @@ endfunction()
 
 # List of currently used arch values
 if (${ARCH} MATCHES "aarch64-")
-  # aarch64-linux and aarch64-qnx
-  set(CUDA_known_archs "53" "62" "72" "75" "87")
+  # aarch64-linux
+  set(CUDA_known_archs "53" "62" "72" "75" "87" "90a")
 elseif (${ARCH} MATCHES "aarch64")
   # aarch64 SBSA, only >=Volta
   # from the whole list/; "70" "75" "80" "86"
   # we pick only major arch as minor should be compatible without JITing, it should
   # shrink  the output binary
-  set(CUDA_known_archs "70" "80" "90")
+  set(CUDA_known_archs "70" "80" "90" "100" "120")
 else()
   # from the whole list: "35" "50" "52" "60" "61" "70" "75" "80" "86"
   # we pick only major arch as minor should be compatible without JITing, it should
   # shrink  the output binary
-  set(CUDA_known_archs "35" "50" "60" "70" "80" "90")
+  set(CUDA_known_archs "35" "50" "60" "70" "80" "90" "100" "120")
 endif()
 
 set(CUDA_TARGET_ARCHS ${CUDA_known_archs} CACHE STRING "List of target CUDA architectures")
@@ -182,7 +182,7 @@ function(CUDA_find_library_stub out_path lib_name)
 endfunction()
 
 function(CUDA_remove_toolkit_include_dirs include_dirs)
-  if (NOT ${CMAKE_CUDA_TOOLKIT_ROOT})
+  if (NOT CMAKE_CUDA_TOOLKIT_ROOT)
     CUDA_get_toolkit_from_compiler(CUDA_TOOLKIT_PATH_VAR)
   else()
     set(CUDA_TOOLKIT_PATH_VAR ${CMAKE_CUDA_TOOLKIT_ROOT})

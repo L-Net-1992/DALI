@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,10 +44,10 @@ inline int VideoReaderOutputFn(const OpSpec &spec) {
 }
 }  // namespace detail
 
-class VideoReader : public DataReader<GPUBackend, SequenceWrapper> {
+class VideoReader : public DataReader<GPUBackend, SequenceWrapper, SequenceWrapper, true> {
  public:
   explicit VideoReader(const OpSpec &spec)
-      : DataReader<GPUBackend, SequenceWrapper>(spec),
+      : DataReader<GPUBackend, SequenceWrapper, SequenceWrapper, true>(spec),
         filenames_(spec.GetRepeatedArgument<std::string>("filenames")),
         file_root_(spec.GetArgument<std::string>("file_root")),
         file_list_(spec.GetArgument<std::string>("file_list")),
@@ -84,7 +84,7 @@ class VideoReader : public DataReader<GPUBackend, SequenceWrapper> {
 
     DALI_ENFORCE(!(has_labels_arg && filenames_.empty()),
                  "The argument ``labels`` is valid only when file paths "
-                 "are provided with ``filenames`` argument.");
+                 "are provided with `filenames` argument.");
 
     if (!filenames_.empty() && has_labels_arg) {
       DALI_ENFORCE(filenames_.size() == labels_.size() || labels_.empty(), make_string("Provided ",
@@ -102,12 +102,14 @@ class VideoReader : public DataReader<GPUBackend, SequenceWrapper> {
       if (enable_frame_num_) frame_num_shape_ = label_shape_;
       if (enable_timestamps_) timestamp_shape_ = uniform_list_shape(max_batch_size_, {count_});
     }
+
+    this->SetInitialSnapshot();
   }
 
   inline ~VideoReader() {
     // stop prefetching so we are not scheduling any more work from here on so we are safe to remove
     // the underlying memory
-    DataReader<GPUBackend, SequenceWrapper>::StopPrefetchThread();
+    DataReader<GPUBackend, SequenceWrapper, SequenceWrapper, true>::StopPrefetchThread();
     // when this destructor is called some kernels can still be scheduled to work on the memory
     // that is present in the prefetched_batch_tensors_
     // prefetched_batch_queue_ keeps the relevant cuda events recorded that are associated with
@@ -148,6 +150,9 @@ class VideoReader : public DataReader<GPUBackend, SequenceWrapper> {
   virtual void ProcessVideo(TensorList<GPUBackend> &video_output,
                             TensorList<GPUBackend> &video_batch, Workspace &ws) {
     video_output.Copy(video_batch, ws.stream());
+    for (int data_idx = 0; data_idx < video_batch.num_samples(); ++data_idx) {
+      video_output.SetSourceInfo(data_idx, video_batch.GetMeta(data_idx).GetSourceInfo());
+    }
     video_output.SetLayout("FHWC");
   }
 
@@ -222,7 +227,7 @@ class VideoReader : public DataReader<GPUBackend, SequenceWrapper> {
   bool can_use_frames_timestamps_ = false;
   bool output_labels_ = false;
 
-  USE_READER_OPERATOR_MEMBERS(GPUBackend, SequenceWrapper);
+  USE_READER_OPERATOR_MEMBERS(GPUBackend, SequenceWrapper, SequenceWrapper, true);
 };
 
 }  // namespace dali

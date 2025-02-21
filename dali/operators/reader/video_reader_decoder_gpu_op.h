@@ -1,4 +1,4 @@
-// Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 #include "dali/operators/reader/loader/video/video_loader_decoder_gpu.h"
 
 namespace dali {
-class VideoReaderDecoderGpu : public DataReader<GPUBackend, VideoSampleGpu> {
+class VideoReaderDecoderGpu : public DataReader<GPUBackend, VideoSampleGpu, VideoSampleGpu, true> {
  public:
   explicit VideoReaderDecoderGpu(const OpSpec &spec);
 
@@ -29,12 +29,13 @@ class VideoReaderDecoderGpu : public DataReader<GPUBackend, VideoSampleGpu> {
 
   void RunImpl(Workspace &ws) override;
 
-  bool CanInferOutputs() const override { return true; }
+  bool HasContiguousOutputs() const override { return true; }
 
   void Prefetch() override;
 
  private:
   bool has_labels_ = false;
+  bool has_frame_idx_  = false;
 };
 
 }  // namespace dali

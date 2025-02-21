@@ -1,4 +1,4 @@
-# Copyright (c) 2018-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 # caffe_parse_header
 # Reads set of version defines from the header file
@@ -132,10 +132,14 @@ endmacro()
 # create phony target first (if not exists with given name yet)
 # and add comand attached to it
 macro(copy_post_build TARGET_NAME SRC DST)
+    if (NOT (TARGET copy_post_build_target))
+        add_custom_target(copy_post_build_target ALL)
+    endif()
     if (NOT (TARGET install_${TARGET_NAME}))
         add_custom_target(install_${TARGET_NAME} ALL
              DEPENDS ${TARGET_NAME}
         )
+        add_dependencies(copy_post_build_target install_${TARGET_NAME})
     endif()
 
     add_custom_command(
@@ -412,4 +416,31 @@ function(custom_filter CURR_DIR ORIG_FILE_LIST EXTRA_FILE_LIST INCLUDE_PATTERNS 
     set(${ORIG_FILE_LIST} ${${ORIG_FILE_LIST}} PARENT_SCOPE)
   endif()
 
+endfunction()
+
+function(get_link_libraries OUTPUT_LIST TARGET)
+    get_target_property(IMPORTED ${TARGET} IMPORTED)
+    list(APPEND VISITED_TARGETS ${TARGET})
+    if (IMPORTED)
+        get_target_property(LIBS ${TARGET} INTERFACE_LINK_LIBRARIES)
+    else()
+        get_target_property(LIBS ${TARGET} LINK_LIBRARIES)
+    endif()
+    set(LIB_FILES "")
+    foreach(LIB ${LIBS})
+        if (TARGET ${LIB})
+            list(FIND VISITED_TARGETS ${LIB} VISITED)
+            if (${VISITED} EQUAL -1)
+                get_target_property(type ${LIB} TYPE)
+                if (NOT ${type} STREQUAL "INTERFACE_LIBRARY")
+                    get_target_property(LIB_FILE ${LIB} LOCATION)
+                    get_filename_component(LIB_FILE ${LIB_FILE} NAME)
+                endif()
+                get_link_libraries(LINK_LIB_FILES ${LIB})
+                list(APPEND LIB_FILES ${LIB_FILE} ${LINK_LIB_FILES})
+            endif()
+        endif()
+    endforeach()
+    set(VISITED_TARGETS ${VISITED_TARGETS} PARENT_SCOPE)
+    set(${OUTPUT_LIST} ${LIB_FILES} PARENT_SCOPE)
 endfunction()

@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,9 +25,9 @@ namespace dali {
 DALI_SCHEMA(Constant)
   .DocStr(R"code(Produces a batch of constant tensors.
 
-The floating point input data should be placed in the ``fdata`` argument
-and integer data in ``idata``. The data, which can be a flat vector of values or a scalar,
-is then reshaped according to the ``shape`` argument. If the data is scalar, it will be broadcast
+The floating point input data should be placed in the `fdata` argument
+and integer data in `idata`. The data, which can be a flat vector of values or a scalar,
+is then reshaped according to the `shape` argument. If the data is scalar, it will be broadcast
 to fill the entire shape.
 
 The operator only performs meaningful work at first invocation; subsequent calls will return
@@ -36,13 +36,14 @@ a reference to the same memory.
 The operator can be automatically instantiated in Python with a call to
 :func:`types.Constant(value, dtype, shape, layout) <nvidia.dali.types.Constant>`.
 The value can be a scalar, a tuple, a list, or a numpy array. If not explicitly overridden,
-the ``shape`` and ``dtype``, will be taken from the array.
+the `shape` and `dtype`, will be taken from the array.
 
 .. warning::
   64-bit integer and double precision arrays are not supported and will be silently
   downgraded to 32-bit.)code")
   .NumInput(0)
   .NumOutput(1)
+  .MakeDocHidden()
   .AddOptionalArg("shape",
                   "The desired shape of the output. If not set, the data is assumed to be 1D",
                   std::vector<int>())
@@ -50,13 +51,13 @@ the ``shape`` and ``dtype``, will be taken from the array.
                   R"code(Contents of the constant that is produced (for floating point types).
 
 .. note::
-    ``fdata`` and ``idata`` are mutually exclusive, and one of them is required.)code",
+    `fdata` and `idata` are mutually exclusive, and one of them is required.)code",
                   std::vector<float>())
   .AddOptionalArg("idata",
                   R"code(Contents of the constant that is produced (for integer point types).
 
 .. note::
-    ``fdata`` and ``idata`` are mutually exclusive, and one of them is required.)code",
+    `fdata` and `idata` are mutually exclusive, and one of them is required.)code",
                   std::vector<int>())
   .AddOptionalTypeArg("dtype", R"code(Output data type.
 

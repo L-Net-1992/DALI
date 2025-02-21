@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -128,6 +128,7 @@ struct SeparableResamplingGPUImpl : Interface {
         which_pass,
         descs_gpu, block2sample.data, block2sample.shape[0],
         setup.block_dim,
+        setup.shm_size_for_pass[which_pass],
         stream);
   }
 
@@ -138,8 +139,6 @@ struct SeparableResamplingGPUImpl : Interface {
   virtual void
   Run(KernelContext &context, const Output &out, const Input &in, const Params &params) {
     cudaStream_t stream = context.gpu.stream;
-
-    SampleDesc *descs_gpu = context.scratchpad->AllocateGPU<SampleDesc>(setup.sample_descs.size());
 
     int blocks_in_all_passes = 0;
     for (auto x : setup.total_blocks)
@@ -185,12 +184,8 @@ struct SeparableResamplingGPUImpl : Interface {
         out.tensor_data(i));
     }
 
-    CUDA_CALL(cudaMemcpyAsync(
-        descs_gpu,
-        setup.sample_descs.data(),
-        setup.sample_descs.size()*sizeof(SampleDesc),
-        cudaMemcpyHostToDevice,
-        stream));
+    SampleDesc *descs_gpu;
+    std::tie(descs_gpu) = context.scratchpad->ToContiguousGPU(stream, setup.sample_descs);
 
     RunPasses(descs_gpu, pass_lookup, stream, std::integral_constant<int, spatial_ndim>());
   }

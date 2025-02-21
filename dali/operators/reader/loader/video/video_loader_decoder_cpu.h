@@ -1,4 +1,4 @@
-// Copyright (c) 2021 - 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021 - 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,22 +19,25 @@
 #include <vector>
 
 #include "dali/operators/reader/loader/loader.h"
-#include "dali/operators/reader/loader/video/frames_decoder.h"
+#include "dali/operators/reader/loader/video/frames_decoder_cpu.h"
 #include "dali/operators/reader/loader/video/video_loader_decoder_base.h"
 
 
 namespace dali {
 using VideoSampleCpu = VideoSample<CPUBackend>;
 
-class VideoLoaderDecoderCpu : public Loader<CPUBackend, VideoSampleCpu>, VideoLoaderDecoderBase {
+class VideoLoaderDecoderCpu
+  : public Loader<CPUBackend, VideoSampleCpu, true>, VideoLoaderDecoderBase {
  public:
   explicit inline VideoLoaderDecoderCpu(const OpSpec &spec) :
-    Loader<CPUBackend, VideoSampleCpu>(spec),
+    Loader<CPUBackend, VideoSampleCpu, true>(spec),
     VideoLoaderDecoderBase(spec) { }
 
   void ReadSample(VideoSampleCpu &sample) override;
 
   void PrepareEmpty(VideoSampleCpu &sample) override;
+
+  void Skip() override;
 
  protected:
   Index SizeImpl() override;
@@ -44,7 +47,7 @@ class VideoLoaderDecoderCpu : public Loader<CPUBackend, VideoSampleCpu>, VideoLo
  private:
   void Reset(bool wrap_to_shard) override;
 
-  std::vector<FramesDecoder> video_files_;
+  std::vector<FramesDecoderCpu> video_files_;
 };
 
 }  // namespace dali

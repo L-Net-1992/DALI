@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nose.plugins.attrib import attr
+from nose_utils import attr
 
 # it is enough to just import all functions from test_internals_operator_external_source
 # nose will query for the methods available and will run them
@@ -22,6 +22,7 @@ from nose.plugins.attrib import attr
 from test_external_source_impl import *  # noqa:F403, F401
 from test_external_source_impl import use_cupy
 from test_utils import check_output, check_output_pattern
+import nvidia.dali
 from nvidia.dali import Pipeline, pipeline_def
 import nvidia.dali.fn as fn
 from nvidia.dali.tensors import TensorGPU
@@ -35,6 +36,9 @@ use_cupy()
 import cupy as cp  # noqa:E402  - we need to call this after use_cupy()
 
 
+assert nvidia.dali.types._is_cupy_array(cp.array([1, 2, 3])), "CuPy array not recognized"
+
+
 def test_external_source_with_iter_cupy_stream():
     with cp.cuda.Stream(non_blocking=True):
         for attempt in range(10):
@@ -44,11 +48,11 @@ def test_external_source_with_iter_cupy_stream():
                 return [cp.array([attempt * 100 + i * 10 + 1.5], dtype=cp.float32)]
 
             pipe.set_outputs(fn.external_source(get_data))
-            pipe.build()
 
             for i in range(10):
-                check_output(pipe.run(),
-                             [np.array([attempt * 100 + i * 10 + 1.5], dtype=np.float32)])
+                check_output(
+                    pipe.run(), [np.array([attempt * 100 + i * 10 + 1.5], dtype=np.float32)]
+                )
 
 
 def test_external_source_mixed_contiguous():
@@ -64,11 +68,12 @@ def test_external_source_mixed_contiguous():
     pipe = Pipeline(batch_size, 3, 0)
 
     pipe.set_outputs(fn.external_source(device="gpu", source=generator, no_copy=True))
-    pipe.build()
 
-    pattern = "ExternalSource operator should not mix contiguous and noncontiguous inputs. " \
-              "In such a case the internal memory used to gather data in a contiguous chunk of " \
-              "memory would be trashed."
+    pattern = (
+        "ExternalSource operator should not mix contiguous and noncontiguous inputs. "
+        "In such a case the internal memory used to gather data in a contiguous chunk of "
+        "memory would be trashed."
+    )
     with check_output_pattern(pattern):
         for _ in range(iterations):
             pipe.run()
@@ -76,7 +81,7 @@ def test_external_source_mixed_contiguous():
 
 def _test_cross_device(src, dst, use_dali_tensor=False):
     # The use_dali_tensor converts (via the Dlpack) to the DALI native Tensor before feeding the
-    # data, to additionaly check if the constructor works correctly wrt to device_id.
+    # data, to additionally check if the constructor works correctly wrt to device_id.
     # TODO(klecki): [device_id] currently the device_id is not exposed in Python Tensors, so there
     # is no other way we may verify it.
     import nvidia.dali.fn as fn
@@ -86,25 +91,28 @@ def _test_cross_device(src, dst, use_dali_tensor=False):
 
     iter = 0
 
-    def get_data():
-        nonlocal iter
-        with cp.cuda.Device(src):
-            data = cp.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=cp.float32) + iter
-            iter += 1
-        if use_dali_tensor:
-            return TensorGPU(data.toDlpack())
-        return data
+    with cp.cuda.Device(src):
+        with cp.cuda.Stream(src):
 
-    with pipe:
-        pipe.set_outputs(fn.external_source(get_data, batch=False, device='gpu'))
+            def get_data():
+                nonlocal iter
+                data = cp.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=cp.float32) + iter
+                iter += 1
+                if use_dali_tensor:
+                    return TensorGPU(data.toDlpack())
+                return data
 
-    pipe.build()
-    for i in range(10):
-        out, = pipe.run()
-        assert np.array_equal(np.array(out[0].as_cpu()), np.array([[1, 2, 3, 4], [5, 6, 7, 8]]) + i)
+            with pipe:
+                pipe.set_outputs(fn.external_source(get_data, batch=False, device="gpu"))
+
+            for i in range(10):
+                (out,) = pipe.run()
+                assert np.array_equal(
+                    np.array(out[0].as_cpu()), np.array([[1, 2, 3, 4], [5, 6, 7, 8]]) + i
+                )
 
 
-@attr('multigpu')
+@attr("multigpu")
 def test_cross_device():
     if cp.cuda.runtime.getDeviceCount() > 1:
         for src in [0, 1]:
@@ -119,6 +127,7 @@ def _test_memory_consumption(device, test_case):
 
     if device == "cpu":
         import numpy as np
+
         fw = np
     else:
         fw = cp
@@ -128,24 +137,25 @@ def _test_memory_consumption(device, test_case):
 
         def cb(sample_info):
             return batch[sample_info.idx_in_batch]
+
         return cb
 
     def copy_sample():
-
         def cb(sample_info):
             return fw.full((1024, 1024, 4), sample_info.idx_in_batch, dtype=fw.int32)
+
         return cb
 
     def copy_batch():
-
         def cb():
             return fw.full((batch_size, 1024, 1024, 4), 42, dtype=fw.int32)
+
         return cb
 
     cases = {
-        'no_copy_sample': (no_copy_sample, True, False),
-        'copy_sample': (copy_sample, False, False),
-        'copy_batch': (copy_batch, False, True)
+        "no_copy_sample": (no_copy_sample, True, False),
+        "copy_sample": (copy_sample, False, False),
+        "copy_batch": (copy_batch, False, True),
     }
 
     cb, no_copy, batch_mode = cases[test_case]
@@ -153,8 +163,8 @@ def _test_memory_consumption(device, test_case):
     @pipeline_def
     def pipeline():
         return fn.external_source(source=cb(), device=device, batch=batch_mode, no_copy=no_copy)
+
     pipe = pipeline(batch_size=batch_size, num_threads=4, device_id=0)
-    pipe.build()
     for _ in range(num_iters):
         pipe.run()
 

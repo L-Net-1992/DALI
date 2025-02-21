@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,23 +23,24 @@
 #include "dali/core/common.h"
 #include "dali/pipeline/operator/common.h"
 #include "dali/core/error_handling.h"
+#include "dali/pipeline/operator/checkpointing/stateless_operator.h"
 #include "dali/pipeline/operator/operator.h"
 
 namespace dali {
 
 template <typename Backend>
-class Paste : public Operator<Backend> {
+class Paste : public StatelessOperator<Backend> {
  public:
   // 6 values: in_H, in_W, out_H, out_W, paste_y, paste_x
   static const int NUM_INDICES = 6;
 
   explicit Paste(const OpSpec &spec)
-      : Operator<Backend>(spec), C_(spec.GetArgument<int>("n_channels")) {
+      : StatelessOperator<Backend>(spec), C_(spec.GetArgument<int>("n_channels")) {
     // Kind of arbitrary, we need to set some limit here
     // because we use static shared memory for storing
     // fill value array
     DALI_ENFORCE(C_ <= 1024, "n_channels of more than 1024 is not supported");
-    std::vector<uint8> rgb;
+    std::vector<uint8_t> rgb;
     GetSingleOrRepeatedArg(spec, rgb, "fill_value", C_);
     fill_value_.set_order(cudaStream_t(0));
     fill_value_.Copy(rgb);
@@ -64,8 +65,6 @@ class Paste : public Operator<Backend> {
   }
 
   void RunImpl(legacy_workspace_t<Backend> &ws) override;
-
-  void SetupSharedSampleParams(legacy_workspace_t<Backend> &ws) override;
 
   void SetupSampleParams(legacy_workspace_t<Backend> &ws);
 

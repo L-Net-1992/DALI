@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -84,6 +84,17 @@ constexpr Value align_up(Value v, Alignment a) {
   return v + ((a - 1) & -v);
 }
 
+template <typename Value, typename Alignment>
+DALI_HOST_DEV
+constexpr Value alignment_offset(Value v, Alignment a) {
+  return v & (a - 1);
+}
+
+template <typename Value, typename Alignment>
+DALI_HOST_DEV
+constexpr Value align_down(Value v, Alignment a) {
+  return v & -a;
+}
 
 DALI_HOST_DEV
 constexpr int32_t div_ceil(int32_t total, uint32_t grain) {
@@ -289,6 +300,42 @@ struct identity {
   }
 };
 
+/** Implements a trait that checks for the presence of a member called <member_name>
+ *
+ * Usage:
+ * ```
+ * // at namespace/global scope
+ * IMPL_HAS_MEMBER(foo);
+ *
+ * struct S {
+ *     int foo;
+ * };
+ *
+ * template <typename X>
+ * auto foo_or_zero(X x) {
+ *   if constexpr (has_member_foo_v<X>)
+ *     return x.foo;
+ *   else
+ *     return 0;  // no foo in x
+ * }
+ *
+ * int main() {
+ *   S s { 42 };
+ *   cout << foo_or_zero(s) << endl;  // 42
+ *   cout << foo_or_zero(1.234) << endl;  // 0
+ * }
+ *
+ * ```
+ */
+#define IMPL_HAS_MEMBER(member_name)\
+template <typename T, typename = decltype(std::declval<T>().member_name)>\
+std::true_type HasMember_##member_name(T *);\
+std::false_type HasMember_##member_name(...);\
+template <typename T>\
+using has_member_##member_name = \
+  decltype(HasMember_##member_name(std::declval<std::add_pointer_t<T>>()));\
+template <typename T>\
+constexpr bool has_member_##member_name##_v = has_member_##member_name<T>::value
 
 #define IMPL_HAS_NESTED_TYPE(type_name)\
 template <typename T>\
@@ -441,25 +488,5 @@ inline auto flatten(span<const std::array<T, N>, extent> in) {
 }
 
 }  // namespace dali
-
-/// @brief Returns the product of all elements in shape
-/// @param getter - function obtaining property
-/// @param value - value where to put the property, in case of failure it gets -1
-/// @param property - enum for the select right property
-/// @param success_status - enum value for success status of getter
-template <typename F, typename E, typename S>
-void GetVersionProperty(F getter, int *value, E property, S success_status) {
-  if (getter(property, value) != success_status) {
-    *value = -1;
-  }
-}
-
-// gets single int that can be represented as int value
-static int GetVersionNumber(int major, int minor, int patch) {
-  if (major < 0 || minor < 0 || patch < 0) {
-    return -1;
-  }
-  return major*1000 + minor*10 + patch;
-}
 
 #endif  // DALI_CORE_UTIL_H_

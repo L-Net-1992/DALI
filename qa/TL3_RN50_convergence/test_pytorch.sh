@@ -12,6 +12,9 @@ cd /opt/dali/docs/examples/use_cases/pytorch/resnet50
 
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 
+# turn off SHARP to avoid NCCL errors
+export NCCL_NVLS_ENABLE=0
+
 if [ ! -d "val" ]; then
    ln -sf /data/imagenet/val-jpeg/ val
 fi
@@ -22,7 +25,7 @@ fi
 LOG=dali.log
 
 SECONDS=0
-python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} main.py -a resnet50 --dali_cpu --b 128  --loss-scale 128.0 --workers 4 --lr=0.4 --opt-level O2 ./ 2>&1 | tee $LOG
+torchrun --nproc_per_node=${NUM_GPUS} main.py -a resnet50 --dali_cpu --b 128 --loss-scale 128.0 --workers 4 --lr=0.4 --fp16-mode ./ 2>&1 | tee $LOG
 
 RET=${PIPESTATUS[0]}
 echo "Training ran in $SECONDS seconds"
@@ -33,7 +36,7 @@ fi
 
 MIN_TOP1=75.0
 MIN_TOP5=92.0
-MIN_PERF=5900
+MIN_PERF=13000
 
 TOP1=$(grep "^##Top-1" $LOG | awk '{print $2}')
 TOP5=$(grep "^##Top-5" $LOG | awk '{print $2}')
